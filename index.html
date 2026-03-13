@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>语音触发音乐 + 音量规则 + 多文件排序下一首（安卓友好）</title>
+  <title>语音触发音乐 + 音量规则 + 单首添加歌单（安卓）</title>
   <style>
     body { font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; padding: 16px; }
     button { margin-right: 8px; padding: 10px 14px; }
     input, select { padding: 6px; margin: 4px 0; }
     input[type="number"] { width: 90px; }
-    input[type="text"] { width: 220px; }
+    input[type="text"] { width: 240px; }
     .row { margin: 12px 0; }
     .box { background:#f6f6f6; padding:12px; border-radius:10px; }
     .grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
@@ -47,7 +47,7 @@
   </style>
 </head>
 <body>
-  <h3>语音触发音乐（可配置音量规则 + 多文件按文件名排序“下一首”）</h3>
+  <h3>语音触发音乐（可配置音量规则 + 一首一首添加歌单 + 按文件名排序）</h3>
 
   <div class="row">
     <button id="start">开始识别</button>
@@ -66,13 +66,13 @@
     </div>
 
     <div class="ruleline">
-      <b>播放列表（多文件）：</b>
-      <!-- ✅ 多文件选择（安卓更稳定） -->
-      <input id="files" type="file" multiple accept="audio/*" />
+      <b>歌单（单首添加）：</b>
+      <input id="files" type="file" accept="audio/*" />
+      <button id="clearList">清空歌单</button>
       <button id="playCurrent">播放当前</button>
       <button id="nextBtn">下一首</button>
       <button id="prevBtn">上一首</button>
-      <span class="hint">选择多首音频后会按文件名排序生成列表。</span>
+      <span class="hint">每次选择 1 首会追加进歌单，并按文件名排序。</span>
     </div>
 
     <div>
@@ -90,7 +90,7 @@
 
     <div>
       <b>播放规则（可配置）：</b>
-      <div class="hint">命中口令后：播放指定音频并跳到指定秒（可用 https 音频链接）。</div>
+      <div class="hint">命中口令后：播放指定音频并跳到指定秒（这里建议用 https 音频链接）。</div>
 
       <div class="ruleline">
         口令1：<input id="k1" type="text" value="开始音乐" />
@@ -134,13 +134,13 @@
 
     <div class="ruleline">
       <button id="test">测试播放（用口令1规则）</button>
-      <span class="hint warn">安卓请用 Chrome 打开 https 页面；如出现 network，换网络/热点。</span>
+      <span class="hint warn">请用安卓 Chrome 打开 HTTPS 页面；如出现 network，换网络/热点或避免微信内置浏览器。</span>
     </div>
   </div>
 
   <div class="row">
     <b>播放顺序（按文件名排序）：</b>
-    <div id="playlist">(还没选择文件)</div>
+    <div id="playlist">(还没添加歌曲)</div>
   </div>
 
   <audio id="audio" preload="auto"></audio>
@@ -166,7 +166,8 @@
       const clearBtn = safeEl('clear');
       const testBtn = safeEl('test');
 
-      const filesInput = safeEl('files');           // ✅ 改这里
+      const filesInput = safeEl('files');
+      const clearListBtn = safeEl('clearList');
       const playCurrentBtn = safeEl('playCurrent');
       const nextBtn = safeEl('nextBtn');
       const prevBtn = safeEl('prevBtn');
@@ -259,14 +260,14 @@
         }
       }
 
-      // ===== 播放列表（多文件选择 + 文件名排序）=====
+      // ===== 播放列表（单首添加 + 按文件名排序）=====
       let playlist = [];
       let currentIndex = 0;
 
       function rebuildPlaylistView() {
         if (!playlistEl || !nowSongEl) return;
         if (!playlist.length) {
-          playlistEl.textContent = "(还没选择文件)";
+          playlistEl.textContent = "(还没添加歌曲)";
           nowSongEl.textContent = "--";
           return;
         }
@@ -287,7 +288,7 @@
 
       async function playCurrent(startSec = 0) {
         if (!playlist.length) {
-          logLine("❌ 没有播放列表：请先选择多首音频文件");
+          logLine("❌ 没有播放列表：请先添加歌曲");
           return;
         }
         await playFromUrl(playlist[currentIndex].url, startSec);
@@ -295,7 +296,7 @@
 
       async function nextTrack() {
         if (!playlist.length) {
-          logLine("❌ 没有播放列表：请先选择多首音频文件");
+          logLine("❌ 没有播放列表：请先添加歌曲");
           return;
         }
         setIndex(currentIndex + 1);
@@ -305,7 +306,7 @@
 
       async function prevTrack() {
         if (!playlist.length) {
-          logLine("❌ 没有播放列表：请先选择多首音频文件");
+          logLine("❌ 没有播放列表：请先添加歌曲");
           return;
         }
         setIndex(currentIndex - 1);
@@ -339,30 +340,67 @@
         return null;
       }
 
-      // ✅ 读取多文件并排序
+      // 单首添加（也兼容偶尔一次选择多个）
       if (filesInput) {
         filesInput.addEventListener('change', () => {
+          try {
+            const pickedFiles = Array.from(filesInput.files || []);
+            if (pickedFiles.length === 0) return;
+
+            const map = new Map();
+            for (const item of playlist) map.set(item.key, item);
+
+            for (const f of pickedFiles) {
+              const isAudio = (f.type || "").startsWith("audio/") || /\.(mp3|m4a|aac|wav|ogg|flac)$/i.test(f.name);
+              if (!isAudio) continue;
+
+              const key = `${f.name}__${f.size}__${f.lastModified}`;
+              if (map.has(key)) {
+                logLine(`⚠️ 已存在：${f.name}`);
+                continue;
+              }
+
+              map.set(key, {
+                key,
+                name: f.name,
+                file: f,
+                url: URL.createObjectURL(f),
+              });
+              logLine(`➕ 已添加：${f.name}`);
+            }
+
+            playlist = Array.from(map.values()).sort((a, b) =>
+              a.name.localeCompare(b.name, "zh-Hans-CN", { numeric: true, sensitivity: "base" })
+            );
+
+            if (playlist.length === 0) currentIndex = 0;
+            else currentIndex = Math.min(currentIndex, playlist.length - 1);
+
+            logLine(`🎵 当前歌单：${playlist.length} 首（按文件名排序）`);
+            rebuildPlaylistView();
+
+            // 关键：清空 input，确保下一次选同一文件也能触发 change
+            filesInput.value = "";
+          } catch (e) {
+            logLine(`❌ 添加失败：${e?.message || e}`);
+          }
+        });
+      }
+
+      if (clearListBtn) {
+        clearListBtn.onclick = () => {
           try {
             for (const item of playlist) {
               try { URL.revokeObjectURL(item.url); } catch {}
             }
             playlist = [];
             currentIndex = 0;
-
-            const files = Array.from(filesInput.files || []);
-            // 只保留音频
-            const audioFiles = files.filter(f => (f.type || "").startsWith("audio/") || /\.(mp3|m4a|aac|wav|ogg|flac)$/i.test(f.name));
-
-            // 按文件名排序（支持数字排序）
-            audioFiles.sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN", { numeric: true, sensitivity: "base" }));
-
-            playlist = audioFiles.map(f => ({ name: f.name, file: f, url: URL.createObjectURL(f) }));
-            logLine(`🎵 已加载音频：${playlist.length} 首（按文件名排序）`);
             rebuildPlaylistView();
+            logLine("🗑️ 已清空歌单");
           } catch (e) {
-            logLine(`❌ 读取文件失败：${e?.message || e}`);
+            logLine(`❌ 清空失败：${e?.message || e}`);
           }
-        });
+        };
       }
 
       playCurrentBtn && (playCurrentBtn.onclick = () => playCurrent(0));
@@ -383,19 +421,26 @@
       rec.interimResults = false;
 
       let lastTriggerAt = 0;
+      let startTimer = null;
 
       rec.onstart = () => {
+        if (startTimer) clearTimeout(startTimer);
         setStatus("listening");
         logLine("=== 开始识别 ===");
         rebuildPlaylistView();
       };
 
       rec.onerror = (e) => {
+        if (startTimer) clearTimeout(startTimer);
         setStatus("error");
         logLine(`❌ 识别错误：${e?.error || e?.message || e}`);
+        if ((e?.error || "").toLowerCase() === "network") {
+          logLine("提示：network 常见于网络/浏览器限制。建议换网络/热点，或用系统 Chrome 而非内置浏览器。");
+        }
       };
 
       rec.onend = () => {
+        if (startTimer) clearTimeout(startTimer);
         setStatus("stopped");
         logLine("=== 已停止识别 ===");
       };
@@ -415,7 +460,7 @@
         const n = parsePlayN(text, playNPrefix);
         if (n != null) {
           lastTriggerAt = now;
-          if (!playlist.length) return logLine("❌ 还没选择音频文件，无法跳到第N首");
+          if (!playlist.length) return logLine("❌ 还没添加歌曲，无法跳到第N首");
           const idx = n - 1;
           if (idx < 0 || idx >= playlist.length) return logLine(`❌ 第${n}首不存在（共 ${playlist.length} 首）`);
           setIndex(idx);
@@ -438,13 +483,42 @@
       startBtn && (startBtn.onclick = async () => {
         setStatus("starting");
         logLine("🟢 点击：开始识别");
+
+        // 暖机（失败也不影响识别）
         try { await audio?.play(); audio?.pause(); } catch {}
-        try { rec.start(); logLine("✅ 已调用 rec.start()"); }
-        catch (e) { setStatus("start-failed"); logLine(`❌ rec.start() 失败：${e?.name || ""} ${e?.message || e}`); }
+
+        // 超时兜底：1.5 秒没 onstart 就提示
+        if (startTimer) clearTimeout(startTimer);
+        startTimer = setTimeout(() => {
+          if (statusEl && statusEl.textContent === "starting") {
+            setStatus("start-timeout");
+            logLine("❌ 启动识别超时：没有收到 onstart。");
+            logLine("建议：1) 用安卓 Chrome 打开 2) 确认麦克风权限允许 3) 不要用微信内置浏览器 4) 换网络/热点");
+          }
+        }, 1500);
+
+        try {
+          rec.start();
+          logLine("✅ 已调用 rec.start()");
+        } catch (e) {
+          if (startTimer) clearTimeout(startTimer);
+          setStatus("start-failed");
+          logLine(`❌ rec.start() 失败：${e?.name || ""} ${e?.message || e}`);
+          if ((e?.name || "").includes("InvalidStateError")) {
+            logLine("提示：识别可能已在运行，先点“停止识别”再开始。");
+          }
+        }
       });
 
-      stopBtn && (stopBtn.onclick = () => { logLine("🟥 点击：停止识别"); try { rec.stop(); } catch {} });
-      clearBtn && (clearBtn.onclick = () => { if (logEl) logEl.textContent = "（已清空）"; });
+      stopBtn && (stopBtn.onclick = () => {
+        logLine("🟥 点击：停止识别");
+        try { rec.stop(); } catch {}
+      });
+
+      clearBtn && (clearBtn.onclick = () => {
+        if (logEl) logEl.textContent = "（已清空）";
+      });
+
       testBtn && (testBtn.onclick = async () => {
         logLine("🧪 测试播放：使用口令1规则");
         const pr = getPlayRules()[0];
@@ -452,10 +526,12 @@
         await playFromUrl(pr.url, pr.start);
       });
 
-      audio?.addEventListener("volumechange", () => { if (volEl) volEl.textContent = Math.round(audio.volume * 100) + "%"; });
+      audio?.addEventListener("volumechange", () => {
+        if (volEl) volEl.textContent = Math.round(audio.volume * 100) + "%";
+      });
 
       setStatus("ready");
-      logLine("✅ 页面脚本加载完成（多文件版）。先选多首音频文件，再喊“下一首/上一首”。");
+      logLine("✅ 页面脚本加载完成。先一首一首添加歌曲，再喊“下一首/上一首/播放第三首/调大音量”。");
     })();
   </script>
 </body>
