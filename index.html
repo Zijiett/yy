@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>语音触发音乐 + 音量规则 + 单首添加歌单（安卓）</title>
+  <title>语音触发音乐 + 音量规则 + 单首添加歌单（安卓/iOS）</title>
   <style>
     body { font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; padding: 16px; }
     button { margin-right: 8px; padding: 10px 14px; }
@@ -67,12 +67,29 @@
 
     <div class="ruleline">
       <b>歌单（单首添加）：</b>
-      <input id="files" type="file" accept="audio/*" />
+
+      <!-- ✅ iOS 更友好的 accept（扩展名 + mime）+ multiple -->
+      <input
+        id="files"
+        type="file"
+        multiple
+        accept=".mp3,.m4a,.aac,.wav,.ogg,.flac,audio/mpeg,audio/mp3,audio/*"
+      />
+
+      <!-- ✅ iPhone 兜底：允许任意文件 -->
+      <label class="hint" style="user-select:none;">
+        <input id="iosLoose" type="checkbox" />
+        iPhone兼容模式（允许任意文件）
+      </label>
+
       <button id="clearList">清空歌单</button>
       <button id="playCurrent">播放当前</button>
       <button id="nextBtn">下一首</button>
       <button id="prevBtn">上一首</button>
-      <span class="hint">每次选择 1 首会追加进歌单，并按文件名排序。</span>
+
+      <span class="hint">
+        iPhone 若文件变灰：先去“文件App”点一下让云朵下载完成（云朵消失）再回来选。
+      </span>
     </div>
 
     <div>
@@ -134,7 +151,7 @@
 
     <div class="ruleline">
       <button id="test">测试播放（用口令1规则）</button>
-      <span class="hint warn">请用安卓 Chrome 打开 HTTPS 页面；如出现 network，换网络/热点或避免微信内置浏览器。</span>
+      <span class="hint warn">安卓：建议 HTTPS + Chrome；如出现 network，换网络/热点或避免微信内置浏览器。</span>
     </div>
   </div>
 
@@ -152,21 +169,7 @@
   <script>
     (function () {
       "use strict";
-      // ===== 全局错误捕获：任何脚本报错都写进日志（否则你看不到原因）=====
-      window.addEventListener("error", (e) => {
-        try {
-          const msg = `💥 JS错误：${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`;
-          logLine ? logLine(msg) : console.error(msg);
-        } catch (_) {}
-      });
 
-      window.addEventListener("unhandledrejection", (e) => {
-        try {
-          const reason = e.reason?.message || e.reason || e;
-          const msg = `💥 Promise未捕获：${reason}`;
-          logLine ? logLine(msg) : console.error(msg);
-        } catch (_) {}
-      });
       // ----------------------------
       // DOM helpers
       // ----------------------------
@@ -186,6 +189,7 @@
       const testBtn = safeEl('test');
 
       const filesInput = safeEl('files');
+      const iosLoose = safeEl('iosLoose');
       const clearListBtn = safeEl('clearList');
       const playCurrentBtn = safeEl('playCurrent');
       const nextBtn = safeEl('nextBtn');
@@ -204,10 +208,10 @@
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recognition = null;
       let recognizing = false;
-      let shouldAutoRestart = false;     // 你想“断线自动续”就改 true；我默认 false 更安全
+      let shouldAutoRestart = false;
       let startSelfCheckTimer = null;
       let micStream = null;
-      let lastFinalText = "";            // 防止某些机型重复给同一句 final
+      let lastFinalText = "";
       let lastFinalAt = 0;
 
       // cooldown
@@ -228,6 +232,22 @@
         logEl.scrollTop = logEl.scrollHeight;
       }
 
+      // ===== 全局错误捕获：任何脚本报错都写进日志（否则你看不到原因）=====
+      window.addEventListener("error", (e) => {
+        try {
+          const msg = `💥 JS错误：${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`;
+          logLine(msg);
+        } catch (_) {}
+      });
+
+      window.addEventListener("unhandledrejection", (e) => {
+        try {
+          const reason = e.reason?.message || e.reason || e;
+          const msg = `💥 Promise未捕获：${reason}`;
+          logLine(msg);
+        } catch (_) {}
+      });
+
       // ----------------------------
       // utils
       // ----------------------------
@@ -243,15 +263,12 @@
       function parseChineseNumber(raw) {
         const s = normalizeText(raw);
         if (!s) return NaN;
-
-        // 阿拉伯数字优先
         const m = s.match(/\d+/);
         if (m) return parseInt(m[0], 10);
 
         const map = { 零:0, 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9 };
         if (s.length === 1 && map[s] != null) return map[s];
 
-        // 十、十一、二十、二十三...
         if (s === "十") return 10;
         if (s.startsWith("十")) {
           const tail = s.slice(1);
@@ -263,8 +280,7 @@
           return map[head] * 10;
         }
         if (s.includes("十")) {
-          const parts = s.split("十");
-          const a = parts[0], b = parts[1] || "";
+          const [a, b = ""] = s.split("十");
           if (map[a] == null) return NaN;
           const tens = map[a] * 10;
           const ones = (b && map[b] != null) ? map[b] : 0;
@@ -287,6 +303,12 @@
         return Number.isFinite(v) ? Math.max(0, v) : 0;
       }
 
+      function escapeHtml(s) {
+        return String(s || "").replace(/[&<>"']/g, (c) => ({
+          "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+        }[c]));
+      }
+
       // ----------------------------
       // audio helpers
       // ----------------------------
@@ -304,22 +326,16 @@
             return;
           }
 
-          // 切歌
           if (audio.getAttribute('src') !== url) {
             audio.setAttribute('src', url);
             audio.load();
           }
 
-          // iOS/安卓某些机型：先 play 再 seek 更稳定；但也有相反情况
           audio.pause();
 
-          // 尽量等到能 seek 再跳
           const target = Math.max(0, Number(second || 0));
-          const trySeek = () => {
-            try { audio.currentTime = target; } catch (_) {}
-          };
+          const trySeek = () => { try { audio.currentTime = target; } catch (_) {} };
 
-          // 有的浏览器必须先播放才允许 currentTime
           await audio.play();
           if (Number.isFinite(target) && target > 0) {
             if (audio.readyState >= 1) {
@@ -333,10 +349,10 @@
             }
           }
 
-          logLine(`▶ 播放：${decodeURIComponent(url).slice(0, 80)}${url.length > 80 ? "…" : ""} | 从 ${target}s`);
+          logLine(`▶ 播放：${(url || "").slice(0, 80)}${url.length > 80 ? "…" : ""} | 从 ${target}s`);
         } catch (e) {
           logLine(`❌ 播放失败：${e?.name || ""} ${e?.message || e}`);
-          logLine(`提示：请先手动点一次“播放当前/测试播放”授权媒体播放；并用 HTTPS + Chrome。`);
+          logLine(`提示：请先手动点一次“播放当前/测试播放”授权媒体播放；并尽量用 HTTPS。`);
         }
       }
 
@@ -397,21 +413,13 @@
       }
 
       function fillSelectOptions() {
-        // 用上传的歌填充 u1/u2
         for (const sel of audioSelects) {
           if (!sel) continue;
           const options = playlist.map((item) =>
             `<option value="${item.url}">${escapeHtml(item.name)}</option>`
           ).join("");
-
           sel.innerHTML = options || `<option value="">(请先上传歌曲)</option>`;
         }
-      }
-
-      function escapeHtml(s) {
-        return String(s || "").replace(/[&<>"']/g, (c) => ({
-          "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
-        }[c]));
       }
 
       function revokeAllObjectUrls() {
@@ -420,21 +428,53 @@
         }
       }
 
-      // 单首添加（也兼容偶尔一次选择多个）
+      // ✅ iPhone 兜底：切换 accept，减少“灰色不可选”
+      const DEFAULT_ACCEPT = ".mp3,.m4a,.aac,.wav,.ogg,.flac,audio/mpeg,audio/mp3,audio/*";
+      function applyAcceptMode() {
+        if (!filesInput) return;
+        if (iosLoose?.checked) {
+          filesInput.setAttribute("accept", "*/*");
+          logLine("🧩 已启用 iPhone兼容模式：accept=*/*（可选任意文件；若仍灰，多半是云朵未下载）");
+        } else {
+          filesInput.setAttribute("accept", DEFAULT_ACCEPT);
+          logLine("🧩 已关闭 iPhone兼容模式：恢复音频筛选");
+        }
+      }
+      if (iosLoose) iosLoose.addEventListener("change", applyAcceptMode);
+
+      // 单首添加（也兼容一次选多个）
       if (filesInput) {
+        // 初始化 accept（确保运行时一致）
+        filesInput.setAttribute("accept", DEFAULT_ACCEPT);
+
+        // iOS：点开选择前给提示
+        filesInput.addEventListener("click", () => {
+          const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+          if (isIOS) {
+            logLine("ℹ️ iPhone提示：若文件旁有云朵图标，请先在“文件App”点一下下载完成（云朵消失），否则网页里会灰色不可选。");
+          }
+        });
+
         filesInput.addEventListener('change', () => {
           try {
             const pickedFiles = Array.from(filesInput.files || []);
-            if (pickedFiles.length === 0) return;
+            if (pickedFiles.length === 0) {
+              logLine("ℹ️ 未选择任何文件（若你看到文件是灰色的：通常是 iCloud 云朵未下载）");
+              return;
+            }
 
             const map = new Map();
             for (const item of playlist) map.set(item.key, item);
 
             let added = 0;
             for (const f of pickedFiles) {
-              const isAudio = (f.type || "").startsWith("audio/") || /\.(mp3|m4a|aac|wav|ogg|flac)$/i.test(f.name);
+              // ✅ 更宽松的判断：iOS 有时 f.type 为空
+              const nameOk = /\.(mp3|m4a|aac|wav|ogg|flac)$/i.test(f.name);
+              const typeOk = (f.type || "").startsWith("audio/");
+              const isAudio = typeOk || nameOk;
+
               if (!isAudio) {
-                logLine(`⚠️ 跳过非音频：${f.name}`);
+                logLine(`⚠️ 跳过非音频：${f.name}（type=${f.type || "unknown"}）`);
                 continue;
               }
 
@@ -465,7 +505,6 @@
             rebuildPlaylistView();
             fillSelectOptions();
 
-            // 清空 input，确保下一次选同一文件也能触发 change
             filesInput.value = "";
           } catch (e) {
             logLine(`❌ 添加失败：${e?.message || e}`);
@@ -489,195 +528,148 @@
       }
 
       // ----------------------------
-      // Speech recognition: mic self-check + lifecycle
+      // Speech recognition
       // ----------------------------
-      function buildRecognition() {
-        if (!SpeechRecognition) return null;
-        const r = new SpeechRecognition();
-        r.continuous = true;
-        r.interimResults = true;
-        r.lang = 'zh-CN';
-        r.maxAlternatives = 1;
-        return r;
-      }
+      async function startRecognitionWithHardDiagnostics() {
+        setStatus("checking");
+        logLine("🔎 自检0：函数已进入（如果你看不到这行，说明按钮没绑定到这里）");
 
-      async function ensureMicPermission() {
-        // Permissions API（可选）
+        const isLocalhost =
+          location.hostname === "localhost" ||
+          location.hostname === "127.0.0.1" ||
+          location.hostname === "::1";
+
+        const isHttpsOrLocal = (location.protocol === "https:" || isLocalhost);
+        logLine(`🔎 自检1：HTTPS_or_local=${isHttpsOrLocal} | protocol=${location.protocol} | host=${location.hostname}`);
+
+        if (!isHttpsOrLocal) {
+          setStatus("need_https");
+          logLine("❌ 不是 HTTPS：手机端语音识别/麦克风大概率被限制。请用 HTTPS 打开。");
+          return;
+        } else if (isLocalhost && location.protocol !== "https:") {
+          logLine("ℹ️ 当前为本机 http 调试（localhost/127.0.0.1 允许）。真机/公网访问务必使用 HTTPS。");
+        }
+
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        logLine(`🔎 自检2：SpeechRecognition支持=${!!SR}`);
+        logLine(`🔎 自检3：getUserMedia支持=${!!navigator.mediaDevices?.getUserMedia}`);
+        if (!SR) {
+          setStatus("unsupported");
+          logLine("❌ 浏览器不支持 Web Speech API（iOS Safari 通常不支持 SpeechRecognition；安卓用 Chrome）");
+          return;
+        }
+        if (!navigator.mediaDevices?.getUserMedia) {
+          setStatus("unsupported");
+          logLine("❌ 浏览器不支持 getUserMedia（无法获取麦克风）。");
+          return;
+        }
+
+        setStatus("mic_check");
+        logLine("🔎 自检4：请求麦克风权限(getUserMedia)...");
+        let stream = null;
         try {
-          if (navigator.permissions?.query) {
-            const st = await navigator.permissions.query({ name: "microphone" });
-            logLine(`🔎 麦克风权限状态：${st.state}`); // granted / prompt / denied
+          stream = await promiseWithTimeout(
+            navigator.mediaDevices.getUserMedia({ audio: true }),
+            8000,
+            "getUserMedia超时：可能弹窗被拦截/系统未弹权限框/浏览器卡死"
+          );
+          logLine("✅ 自检5：麦克风权限OK，已拿到音频流");
+        } catch (e) {
+          setStatus("mic_denied");
+          logLine(`❌ 自检5：麦克风失败：${e?.name || ""} ${e?.message || e}`);
+          return;
+        } finally {
+          try { stream?.getTracks()?.forEach(t => t.stop()); } catch (_) {}
+        }
+
+        setStatus("starting");
+        logLine("🔎 自检6：创建 SpeechRecognition 实例并启动...");
+
+        try {
+          if (recognition) {
+            try { recognition.onresult = null; } catch (_) {}
+            try { recognition.onerror = null; } catch (_) {}
+            try { recognition.onend = null; } catch (_) {}
+            try { recognition.stop(); } catch (_) {}
           }
         } catch (_) {}
 
-        if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error("浏览器不支持 getUserMedia，无法自检麦克风");
-        }
+        recognition = new SR();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = "zh-CN";
+        recognition.maxAlternatives = 1;
 
-        // 关闭旧流
-        if (micStream) {
-          micStream.getTracks().forEach(t => t.stop());
-          micStream = null;
-        }
-
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        logLine("✅ 麦克风自检通过：已获得音频输入权限");
-        return true;
-      }
-
-      function attachRecognitionEvents(r) {
-        r.onstart = () => {
-          recognizing = true;
-          setStatus("listening");
-          logLine("🎙️ 识别已启动（onstart）");
-
-          clearTimeout(startSelfCheckTimer);
-          startSelfCheckTimer = setTimeout(() => {
-            logLine("⚠️ 自检提示：已请求开始识别，但暂未收到音频/结果事件。若一直无响应：确认 HTTPS、麦克风权限、不要用微信内置浏览器、换网络。");
-          }, 3000);
-        };
-
-        r.onaudiostart = () => {
-          setStatus("audio_on");
-          logLine("🔊 已检测到音频输入（onaudiostart）");
-          clearTimeout(startSelfCheckTimer);
-        };
-
-        r.onspeechstart = () => {
-          setStatus("speech_detected");
-          logLine("🗣️ 检测到说话（onspeechstart）");
-          clearTimeout(startSelfCheckTimer);
-        };
-
-        r.onspeechend = () => {
-          setStatus("speech_end");
-          logLine("🤫 说话结束（onspeechend）");
-        };
-
-        r.onerror = (e) => {
-          setStatus("error");
-          const code = e?.error || "unknown";
-          logLine(`❌ 识别错误：${code}`);
-          if (code === "not-allowed" || code === "service-not-allowed") {
-            logLine("➡️ 可能未授权麦克风或系统禁止语音服务：请在浏览器/系统设置允许麦克风权限。");
-          } else if (code === "network") {
-            logLine("➡️ network 常见于网络/服务不可用：请换网络/热点，且务必 HTTPS + Chrome 外部打开。");
-          } else if (code === "no-speech") {
-            logLine("➡️ no-speech：没有检测到语音输入（环境太吵/太轻/麦克风被占用）。");
-          } else if (code === "audio-capture") {
-            logLine("➡️ audio-capture：无法捕获音频（麦克风不可用或被其它应用占用）。");
-          }
-          clearTimeout(startSelfCheckTimer);
-        };
-
-        r.onend = () => {
-          setStatus("stopped");
-          logLine("⏹️ 识别已结束（onend）");
-          clearTimeout(startSelfCheckTimer);
-
-          const wasRecognizing = recognizing;
+        recognition.onstart = () => { recognizing = true; setStatus("listening"); logLine("🎙️ onstart：识别已真正开始"); };
+        recognition.onaudiostart = () => logLine("🔊 onaudiostart：检测到音频输入");
+        recognition.onspeechstart = () => logLine("🗣️ onspeechstart：检测到说话");
+        recognition.onerror = (e) => { setStatus("error"); logLine(`❌ onerror：${e.error || "unknown"}`); };
+        recognition.onend = () => {
           recognizing = false;
-
-          // 可选：自动重启（我默认关闭）
-          if (shouldAutoRestart && wasRecognizing) {
+          setStatus("stopped");
+          logLine("⏹️ onend：识别结束");
+          clearTimeout(startSelfCheckTimer);
+          if (shouldAutoRestart) {
             setTimeout(() => {
-              try {
-                if (recognition && !recognizing) {
-                  recognition.start();
-                  logLine("🔁 自动重启识别…");
-                }
-              } catch (_) {}
+              try { recognition.start(); logLine("🔁 自动重启识别…"); } catch (_) {}
             }, 300);
           }
         };
 
-        r.onresult = (event) => {
-          const results = event.results;
-          if (!results || results.length === 0) return;
-
-          const res = results[results.length - 1];
-          const transcript = normalizeText(res[0]?.transcript || "");
+        recognition.onresult = (event) => {
+          const res = event.results[event.results.length - 1];
+          const txt = normalizeText(res[0]?.transcript || "");
           const isFinal = !!res.isFinal;
-
-          if (!transcript) return;
-
-          // 记录（interim 也记，但不触发命令；你也可以改成只记录 final）
-          logLine(`${isFinal ? "✅" : "…"} 识别：${transcript}`);
-
-          // 只在 final 时触发动作，且做重复保护（某些机型会重复发同一句）
+          if (txt) logLine(`${isFinal ? "✅" : "…"} 识别：${txt}`);
           if (isFinal) {
             const now = Date.now();
-            if (transcript === lastFinalText && (now - lastFinalAt) < 1200) return;
-            lastFinalText = transcript;
+            if (txt === lastFinalText && (now - lastFinalAt) < 1200) return;
+            lastFinalText = txt;
             lastFinalAt = now;
-            handleCommand(transcript).catch((e) => logLine(`❌ 命令处理异常：${e?.message || e}`));
+            handleCommand(txt).catch(err => logLine(`❌ 命令处理异常：${err?.message || err}`));
           }
+        };
+
+        let started = false;
+        const startWatch = setTimeout(() => {
+          if (!started) {
+            logLine("⚠️ 自检7：2.5秒内没收到 onstart —— 说明 recognition.start() 没真正启动。");
+            logLine("➡️ 常见原因：网络/服务不可用/系统语音输入被禁用。");
+          }
+        }, 2500);
+
+        try {
+          recognition.start();
+          logLine("▶ 已调用 recognition.start()（等待 onstart）");
+        } catch (e) {
+          clearTimeout(startWatch);
+          setStatus("start_failed");
+          logLine(`❌ start() 直接抛错：${e?.name || ""} ${e?.message || e}`);
+          return;
+        }
+
+        recognition.onstart = () => {
+          started = true;
+          clearTimeout(startWatch);
+          recognizing = true;
+          setStatus("listening");
+          logLine("🎙️ onstart：识别已真正开始（自检通过）");
         };
       }
 
-      async function startRecognitionWithSelfCheck() {
-        if (!SpeechRecognition) {
-          logLine("❌ 当前浏览器不支持 SpeechRecognition（建议安卓 Chrome）");
-          setStatus("unsupported");
-          return;
-        }
-        if (recognizing) {
-          logLine("ℹ️ 已在识别中");
-          return;
-        }
-
-        setStatus("checking");
-        logLine("🔎 开始自检：HTTPS/麦克风权限/语音引擎...");
-
-        // HTTPS 检测（localhost 允许）
-        if (location.protocol !== "https:" && location.hostname !== "localhost") {
-          logLine("❌ 当前不是 HTTPS：手机端语音识别/麦克风在多数浏览器会被限制。请部署到 HTTPS。");
-          setStatus("need_https");
-          return;
-        }
-
-        // 麦克风权限自检
-        try {
-          await ensureMicPermission();
-        } catch (e) {
-          logLine(`❌ 麦克风自检失败：${e?.name || ""} ${e?.message || e}`);
-          logLine("➡️ 请允许麦克风权限；或在系统设置里开启浏览器麦克风权限。");
-          setStatus("mic_denied");
-          return;
-        }
-
-        // 构建识别器
-        recognition = buildRecognition();
-        if (!recognition) {
-          logLine("❌ 初始化识别器失败");
-          setStatus("init_failed");
-          return;
-        }
-        attachRecognitionEvents(recognition);
-
-        // 启动
-        try {
-          recognition.start();
-          setStatus("starting");
-          logLine("▶ 已调用 recognition.start()，等待 onstart...");
-        } catch (e) {
-          // 常见：短时间重复 start 会抛 InvalidStateError
-          logLine(`❌ start() 调用失败：${e?.name || ""} ${e?.message || e}`);
-          logLine("➡️ 若你刚刚点过开始：请先停止，再等 1~2 秒重试。");
-          setStatus("start_failed");
-        }
+      function promiseWithTimeout(promise, ms, timeoutMsg) {
+        return new Promise((resolve, reject) => {
+          const t = setTimeout(() => reject(new Error(timeoutMsg)), ms);
+          promise.then(v => { clearTimeout(t); resolve(v); }).catch(err => { clearTimeout(t); reject(err); });
+        });
       }
 
       function stopRecognition() {
-        try {
-          if (recognition) recognition.stop();
-        } catch (_) {}
-
+        try { if (recognition) recognition.stop(); } catch (_) {}
         recognizing = false;
         setStatus("stopping");
         logLine("⏹️ 已请求停止识别");
 
-        // 释放自检用麦克风流
         if (micStream) {
           try { micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
           micStream = null;
@@ -695,21 +687,18 @@
         const kwPrev = normalizeText(safeEl('kwPrev')?.value || "上一首");
         const kwPlayN = normalizeText(safeEl('kwPlayN')?.value || "播放第");
 
-        // 1) 下一首
         if (kwNext && text.includes(kwNext)) {
           if (!canHit("next", cooldown)) return;
           await nextTrack();
           return;
         }
 
-        // 2) 上一首
         if (kwPrev && text.includes(kwPrev)) {
           if (!canHit("prev", cooldown)) return;
           await prevTrack();
           return;
         }
 
-        // 3) 播放第N首（播放第3首/播放第三首）
         if (kwPlayN && text.startsWith(kwPlayN)) {
           const tail = text.slice(kwPlayN.length).replace(/首/g, "");
           const n = parseChineseNumber(tail);
@@ -727,7 +716,6 @@
           }
         }
 
-        // 4) 播放规则：口令1/2 -> 从下拉选的上传歌曲播放并跳秒
         const rules = [
           { key: "rule1", kw: normalizeText(safeEl('k1')?.value), sec: Number(safeEl('t1')?.value || 0), selectId: "u1" },
           { key: "rule2", kw: normalizeText(safeEl('k2')?.value), sec: Number(safeEl('t2')?.value || 0), selectId: "u2" }
@@ -737,7 +725,6 @@
           if (!r.kw) continue;
           if (text.includes(r.kw)) {
             if (!canHit(r.key, cooldown)) return;
-
             const sel = safeEl(r.selectId);
             const url = sel?.value || "";
             if (!url) {
@@ -750,7 +737,6 @@
           }
         }
 
-        // 5) 音量规则：口令3/4
         const volRules = [
           { key: "vol1", kw: normalizeText(safeEl('vk1')?.value), action: safeEl('va1')?.value || "inc", val: Number(safeEl('vv1')?.value || 0) },
           { key: "vol2", kw: normalizeText(safeEl('vk2')?.value), action: safeEl('va2')?.value || "set", val: Number(safeEl('vv2')?.value || 0) },
@@ -763,148 +749,16 @@
             if (!audio) return;
 
             const delta = clamp(vr.val, 0, 100) / 100;
-            if (vr.action === "inc") {
-              setVolume01(audio.volume + delta);
-            } else if (vr.action === "dec") {
-              setVolume01(audio.volume - delta);
-            } else {
-              setVolume01(delta);
-            }
+            if (vr.action === "inc") setVolume01(audio.volume + delta);
+            else if (vr.action === "dec") setVolume01(audio.volume - delta);
+            else setVolume01(delta);
+
             logLine(`🔈 音量调整：${vr.kw} → ${Math.round((audio.volume || 0) * 100)}%`);
             return;
           }
         }
       }
-    async function startRecognitionWithHardDiagnostics() {
-      // 0) 先保证 log 一定能看到
-      setStatus("checking");
-      logLine("🔎 自检0：函数已进入（如果你看不到这行，说明按钮没绑定到这里）");
 
-      // 1) 环境检查（允许本机 127.0.0.1 / localhost 在 http 下调试）
-      const isLocalhost =
-        location.hostname === "localhost" ||
-        location.hostname === "127.0.0.1" ||
-        location.hostname === "::1";
-
-      const isHttpsOrLocal = (location.protocol === "https:" || isLocalhost);
-
-      logLine(`🔎 自检1：HTTPS_or_local=${isHttpsOrLocal} | protocol=${location.protocol} | host=${location.hostname}`);
-
-      if (!isHttpsOrLocal) {
-        setStatus("need_https");
-        logLine("❌ 不是 HTTPS：手机端语音识别/麦克风大概率被限制。请用 HTTPS 打开。");
-        return;
-      } else if (isLocalhost && location.protocol !== "https:") {
-        logLine("ℹ️ 当前为本机 http 调试（localhost/127.0.0.1 允许）。真机/公网访问务必使用 HTTPS。");
-      }
-
-      // 2) API 检查
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      logLine(`🔎 自检2：SpeechRecognition支持=${!!SpeechRecognition}`);
-      logLine(`🔎 自检3：getUserMedia支持=${!!navigator.mediaDevices?.getUserMedia}`);
-      if (!SpeechRecognition) {
-        setStatus("unsupported");
-        logLine("❌ 浏览器不支持 Web Speech API（请用安卓 Chrome，别用微信内置）。");
-        return;
-      }
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setStatus("unsupported");
-        logLine("❌ 浏览器不支持 getUserMedia（无法获取麦克风）。");
-        return;
-      }
-
-      // 3) 麦克风权限强制探测（带超时）
-      setStatus("mic_check");
-      logLine("🔎 自检4：请求麦克风权限(getUserMedia)...");
-      let stream = null;
-      try {
-        stream = await promiseWithTimeout(
-          navigator.mediaDevices.getUserMedia({ audio: true }),
-          8000,
-          "getUserMedia超时：可能弹窗被拦截/系统未弹权限框/浏览器卡死"
-        );
-        logLine("✅ 自检5：麦克风权限OK，已拿到音频流");
-      } catch (e) {
-        setStatus("mic_denied");
-        logLine(`❌ 自检5：麦克风失败：${e?.name || ""} ${e?.message || e}`);
-        logLine("➡️ 处理建议：1) 地址栏锁图标-站点设置允许麦克风 2) 系统设置允许浏览器麦克风 3) 换 Chrome 外部打开");
-        return;
-      } finally {
-        // 释放流（只用来确认权限）
-        try { stream?.getTracks()?.forEach(t => t.stop()); } catch (_) {}
-      }
-
-      // 4) 创建识别器 + 绑定事件（每次都重建，避免旧实例卡死）
-      setStatus("starting");
-      logLine("🔎 自检6：创建 SpeechRecognition 实例并启动...");
-
-      try {
-        if (recognition) {
-          // 尝试先停掉旧的
-          try { recognition.onresult = null; } catch (_) {}
-          try { recognition.onerror = null; } catch (_) {}
-          try { recognition.onend = null; } catch (_) {}
-          try { recognition.stop(); } catch (_) {}
-        }
-      } catch (_) {}
-
-      recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = "zh-CN";
-      recognition.maxAlternatives = 1;
-
-      // 关键：把每个生命周期都打印出来
-      recognition.onstart = () => { recognizing = true; setStatus("listening"); logLine("🎙️ onstart：识别已真正开始"); };
-      recognition.onaudiostart = () => logLine("🔊 onaudiostart：检测到音频输入");
-      recognition.onspeechstart = () => logLine("🗣️ onspeechstart：检测到说话");
-      recognition.onerror = (e) => { setStatus("error"); logLine(`❌ onerror：${e.error || "unknown"}`); };
-      recognition.onend = () => { recognizing = false; setStatus("stopped"); logLine("⏹️ onend：识别结束"); };
-
-      recognition.onresult = (event) => {
-        const res = event.results[event.results.length - 1];
-        const txt = normalizeText(res[0]?.transcript || "");
-        const isFinal = !!res.isFinal;
-        if (txt) logLine(`${isFinal ? "✅" : "…"} 识别：${txt}`);
-        if (isFinal) {
-          handleCommand(txt).catch(err => logLine(`❌ 命令处理异常：${err?.message || err}`));
-        }
-      };
-
-      // 5) 启动 + 自检超时：如果 2.5 秒没 onstart，就判定卡住
-      let started = false;
-      const startWatch = setTimeout(() => {
-        if (!started) {
-          logLine("⚠️ 自检7：2.5秒内没收到 onstart —— 说明 recognition.start() 没真正启动。");
-          logLine("➡️ 常见原因：微信内置/权限未允许/Google语音服务不可用/network/系统语音输入被禁用。");
-        }
-      }, 2500);
-
-      try {
-        recognition.start();
-        logLine("▶ 已调用 recognition.start()（等待 onstart）");
-      } catch (e) {
-        clearTimeout(startWatch);
-        setStatus("start_failed");
-        logLine(`❌ start() 直接抛错：${e?.name || ""} ${e?.message || e}`);
-        return;
-      }
-
-      recognition.onstart = () => {
-        started = true;
-        clearTimeout(startWatch);
-        recognizing = true;
-        setStatus("listening");
-        logLine("🎙️ onstart：识别已真正开始（自检通过）");
-      };
-    }
-
-    function promiseWithTimeout(promise, ms, timeoutMsg) {
-      return new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error(timeoutMsg)), ms);
-        promise.then(v => { clearTimeout(t); resolve(v); }).catch(err => { clearTimeout(t); reject(err); });
-      });
-    }
       // ----------------------------
       // Buttons
       // ----------------------------
@@ -925,7 +779,6 @@
       if (nextBtn) nextBtn.addEventListener("click", () => nextTrack());
       if (prevBtn) prevBtn.addEventListener("click", () => prevTrack());
 
-      // 测试播放：用口令1规则（下拉选歌 + 秒数）
       if (testBtn) testBtn.addEventListener("click", async () => {
         const sel = safeEl("u1");
         const url = sel?.value || "";
@@ -937,9 +790,6 @@
         await playFromUrl(url, sec);
       });
 
-      // ----------------------------
-      // audio events: keep UI updated
-      // ----------------------------
       if (audio) {
         audio.addEventListener("volumechange", () => {
           if (volEl) volEl.textContent = Math.round((audio.volume || 0) * 100) + "%";
@@ -949,7 +799,6 @@
         });
       }
 
-      // 初始音量显示
       try {
         if (audio && volEl) volEl.textContent = Math.round((audio.volume ?? 1) * 100) + "%";
       } catch (_) {}
@@ -958,18 +807,19 @@
       fillSelectOptions();
       rebuildPlaylistView();
 
-      // 页面关闭时释放 blob url / mic stream
+      // iOS 贴士
+      const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+      if (isIOS) {
+        logLine("🍎 iPhone提示：文件旁的云朵=未下载到本机，会在网页选择器里灰掉。先在“文件App”点一下下载完成再选。");
+      }
+
+      // 默认应用一次 accept 模式（避免用户刷新后状态不一致）
+      applyAcceptMode();
+
       window.addEventListener("beforeunload", () => {
         try { revokeAllObjectUrls(); } catch (_) {}
-        try {
-          if (micStream) micStream.getTracks().forEach(t => t.stop());
-        } catch (_) {}
+        try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
       });
-
-      // 额外提示：微信内置
-      if (/MicroMessenger/i.test(navigator.userAgent)) {
-        logLine("⚠️ 检测到微信内置浏览器：语音识别/麦克风可能受限。建议用系统浏览器/Chrome 外部打开。");
-      }
     })();
   </script>
 </body>
