@@ -3,87 +3,460 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>iPhone 录音 → Whisper 转写</title>
+  <title>语音触发音乐 + 音量规则 + 多文件排序下一首（安卓友好）</title>
   <style>
     body { font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; padding: 16px; }
-    button { padding: 12px 14px; margin-right: 8px; margin-top: 8px; }
-    #log { white-space: pre-wrap; background:#111; color:#eee; padding:12px; border-radius:10px; min-height:160px; }
+    button { margin-right: 8px; padding: 10px 14px; }
+    input, select { padding: 6px; margin: 4px 0; }
+    input[type="number"] { width: 90px; }
+    input[type="text"] { width: 220px; }
+    .row { margin: 12px 0; }
+    .box { background:#f6f6f6; padding:12px; border-radius:10px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    .ruleline { display:flex; flex-wrap: wrap; gap: 8px; align-items:center; }
+    .hint { color:#666; font-size: 12px; }
+    .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#eee; font-size: 12px; }
+    .warn { color:#b00020; font-weight: 600; }
+
+    #log {
+      white-space: pre-wrap;
+      background:#111;
+      color:#eaeaea;
+      padding: 12px;
+      border-radius: 10px;
+      min-height: 180px;
+      max-height: 320px;
+      overflow:auto;
+      font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    #playlist {
+      white-space: pre-wrap;
+      background:#fff;
+      border: 1px solid #ddd;
+      padding: 10px;
+      border-radius: 10px;
+      max-height: 220px;
+      overflow:auto;
+      font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      font-size: 12px;
+      line-height: 1.4;
+    }
   </style>
 </head>
 <body>
-  <h3>iPhone 网页：按住说话 → Whisper 转写</h3>
-  <button id="rec">按住说话</button>
-  <button id="stop">停止</button>
-  <div style="margin-top:12px;"><b>识别文本：</b> <span id="text">--</span></div>
-  <div id="log">准备就绪（必须 HTTPS）。</div>
+  <h3>语音触发音乐（可配置音量规则 + 多文件按文件名排序“下一首”）</h3>
 
-<script>
-  const logEl = document.getElementById('log');
-  const textEl = document.getElementById('text');
-  const recBtn = document.getElementById('rec');
-  const stopBtn = document.getElementById('stop');
+  <div class="row">
+    <button id="start">开始识别</button>
+    <button id="stop">停止识别</button>
+    <button id="clear">清空日志</button>
+    <span class="pill">当前音量：<span id="vol">--</span></span>
+    <span class="pill">当前曲目：<span id="nowSong">--</span></span>
+    <span class="pill">状态：<span id="status">ready</span></span>
+  </div>
 
-  function log(line) {
-    const ts = new Date().toLocaleTimeString();
-    logEl.textContent += `\n[${ts}] ${line}`;
-    logEl.scrollTop = logEl.scrollHeight;
-  }
+  <div class="row box grid">
+    <div class="ruleline">
+      <b>通用：</b>
+      冷却(秒)：<input id="cooldown" type="number" value="2" min="0" />
+      <span class="hint">（同一条口令在冷却时间内不会重复触发）</span>
+    </div>
 
-  let mediaRecorder = null;
-  let chunks = [];
-  let stream = null;
+    <div class="ruleline">
+      <b>播放列表（多文件）：</b>
+      <!-- ✅ 多文件选择（安卓更稳定） -->
+      <input id="files" type="file" multiple accept="audio/*" />
+      <button id="playCurrent">播放当前</button>
+      <button id="nextBtn">下一首</button>
+      <button id="prevBtn">上一首</button>
+      <span class="hint">选择多首音频后会按文件名排序生成列表。</span>
+    </div>
 
-  async function startRecording() {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    <div>
+      <div class="hint">
+        语音切歌口令（可改下面输入框）：
+        <b>下一首口令</b> / <b>上一首口令</b> / <b>播放第N首</b>（比如“播放第三首”）
+      </div>
+      <div class="ruleline">
+        下一首口令：<input id="kwNext" type="text" value="下一首" />
+        上一首口令：<input id="kwPrev" type="text" value="上一首" />
+        播放第N首口令前缀：<input id="kwPlayN" type="text" value="播放第" />
+        <span class="hint">（“播放第 + 数字 + 首”，例：播放第3首 / 播放第三首）</span>
+      </div>
+    </div>
 
-    const mimeTypes = ['audio/mp4','audio/webm;codecs=opus','audio/webm'];
-    const mimeType = mimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || '';
+    <div>
+      <b>播放规则（可配置）：</b>
+      <div class="hint">命中口令后：播放指定音频并跳到指定秒（可用 https 音频链接）。</div>
 
-    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    chunks = [];
+      <div class="ruleline">
+        口令1：<input id="k1" type="text" value="开始音乐" />
+        秒数：<input id="t1" type="number" value="30" min="0" />
+        音频URL：<input id="u1" type="text" value="https://你的音频地址/music.mp3" />
+      </div>
 
-    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      <div class="ruleline">
+        口令2：<input id="k2" type="text" value="高潮" />
+        秒数：<input id="t2" type="number" value="60" min="0" />
+        音频URL：<input id="u2" type="text" value="https://你的音频地址/music.mp3" />
+      </div>
+    </div>
 
-    mediaRecorder.onstop = async () => {
-      try {
-        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/mp4' });
-        log(`录音结束：${Math.round(blob.size/1024)}KB，上传识别…`);
-        await sendToASR(blob);
-      } finally {
-        stream?.getTracks()?.forEach(t => t.stop());
-        stream = null;
+    <div>
+      <b>音量规则（可配置）：</b>
+      <div class="hint">命中口令后：调整播放器音量（0%~100%）。</div>
+
+      <div class="ruleline">
+        口令3：<input id="vk1" type="text" value="调大音量" />
+        动作：
+        <select id="va1">
+          <option value="inc" selected>增加</option>
+          <option value="dec">减少</option>
+          <option value="set">设为</option>
+        </select>
+        数值：<input id="vv1" type="number" value="15" min="0" max="100" />
+      </div>
+
+      <div class="ruleline">
+        口令4：<input id="vk2" type="text" value="静音" />
+        动作：
+        <select id="va2">
+          <option value="inc">增加</option>
+          <option value="dec">减少</option>
+          <option value="set" selected>设为</option>
+        </select>
+        数值：<input id="vv2" type="number" value="0" min="0" max="100" />
+      </div>
+    </div>
+
+    <div class="ruleline">
+      <button id="test">测试播放（用口令1规则）</button>
+      <span class="hint warn">安卓请用 Chrome 打开 https 页面；如出现 network，换网络/热点。</span>
+    </div>
+  </div>
+
+  <div class="row">
+    <b>播放顺序（按文件名排序）：</b>
+    <div id="playlist">(还没选择文件)</div>
+  </div>
+
+  <audio id="audio" preload="auto"></audio>
+
+  <div class="row">
+    <div id="log">等待开始…</div>
+  </div>
+
+  <script>
+    (function () {
+      const $ = (id) => document.getElementById(id);
+      const safeEl = (id) => $(id) || null;
+
+      const logEl = safeEl('log');
+      const playlistEl = safeEl('playlist');
+      const volEl = safeEl('vol');
+      const nowSongEl = safeEl('nowSong');
+      const statusEl = safeEl('status');
+      const audio = safeEl('audio');
+
+      const startBtn = safeEl('start');
+      const stopBtn = safeEl('stop');
+      const clearBtn = safeEl('clear');
+      const testBtn = safeEl('test');
+
+      const filesInput = safeEl('files');           // ✅ 改这里
+      const playCurrentBtn = safeEl('playCurrent');
+      const nextBtn = safeEl('nextBtn');
+      const prevBtn = safeEl('prevBtn');
+
+      function setStatus(s) { if (statusEl) statusEl.textContent = s; }
+
+      function logLine(line) {
+        const ts = new Date().toLocaleTimeString();
+        if (!logEl) return;
+        if (!logEl.textContent || logEl.textContent === "等待开始…") logEl.textContent = "";
+        logEl.textContent += `\n[${ts}] ${line}`;
+        logEl.scrollTop = logEl.scrollHeight;
       }
-    };
 
-    mediaRecorder.start();
-    log("🎙️ 开始录音…");
-  }
+      function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
-  function stopRecording() {
-    if (mediaRecorder?.state === "recording") mediaRecorder.stop();
-  }
+      function setVolume01(v01) {
+        if (!audio) return;
+        audio.volume = clamp(v01, 0, 1);
+        if (volEl) volEl.textContent = Math.round(audio.volume * 100) + "%";
+      }
 
-  async function sendToASR(blob) {
-    const fd = new FormData();
-    fd.append("file", blob, "speech.mp4");
+      function cooldownMs() {
+        const el = safeEl('cooldown');
+        return Number(el?.value || 0) * 1000;
+      }
 
-    const res = await fetch("/api/asr", { method: "POST", body: fd });
-    if (!res.ok) {
-      const t = await res.text().catch(()=> "");
-      log(`❌ 识别失败：HTTP ${res.status} ${t}`);
-      return;
-    }
-    const data = await res.json();
-    const text = (data.text || "").trim();
-    textEl.textContent = text || "(空)";
-    log("✅ 识别结果：" + text);
-  }
+      function getPlayRules() {
+        const rules = [
+          { keyword: safeEl('k1')?.value?.trim(), start: Number(safeEl('t1')?.value || 0), url: safeEl('u1')?.value?.trim() },
+          { keyword: safeEl('k2')?.value?.trim(), start: Number(safeEl('t2')?.value || 0), url: safeEl('u2')?.value?.trim() },
+        ];
+        return rules.filter(r => r.keyword && r.url);
+      }
 
-  recBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); }, { passive:false });
-  recBtn.addEventListener('touchend',   (e) => { e.preventDefault(); stopRecording();  }, { passive:false });
-  recBtn.addEventListener('mousedown', startRecording);
-  recBtn.addEventListener('mouseup', stopRecording);
-  stopBtn.onclick = stopRecording;
-</script>
+      function getVolumeRules() {
+        const rules = [
+          { keyword: safeEl('vk1')?.value?.trim(), action: safeEl('va1')?.value, value: Number(safeEl('vv1')?.value || 0) },
+          { keyword: safeEl('vk2')?.value?.trim(), action: safeEl('va2')?.value, value: Number(safeEl('vv2')?.value || 0) },
+        ];
+        return rules.filter(r => r.keyword);
+      }
+
+      function getSwitchKeywords() {
+        return {
+          next: safeEl('kwNext')?.value?.trim() || "",
+          prev: safeEl('kwPrev')?.value?.trim() || "",
+          playNPrefix: safeEl('kwPlayN')?.value?.trim() || ""
+        };
+      }
+
+      async function playFromUrl(url, second) {
+        if (!audio) return;
+        try {
+          if (url && audio.getAttribute('src') !== url) {
+            audio.setAttribute('src', url);
+            audio.load();
+          }
+          audio.pause();
+          audio.currentTime = 0;
+
+          await audio.play();
+          audio.currentTime = Math.max(0, second || 0);
+
+          logLine(`▶ 播放：${url} | 从 ${Math.max(0, second || 0)}s`);
+        } catch (e) {
+          logLine(`❌ 播放失败：${e?.name || ""} ${e?.message || e}`);
+          logLine(`提示：音频请用 https 链接；或先点击页面按钮授权播放。`);
+        }
+      }
+
+      function applyVolumeRule(rule) {
+        if (!audio) return;
+        const val = clamp(Number(rule.value || 0), 0, 100);
+        if (rule.action === "set") {
+          setVolume01(val / 100);
+          logLine(`🔊 音量设为：${val}%`);
+          return;
+        }
+        const delta01 = val / 100;
+        if (rule.action === "inc") {
+          setVolume01(audio.volume + delta01);
+          logLine(`🔊 音量增加：+${val}% → ${Math.round(audio.volume * 100)}%`);
+          return;
+        }
+        if (rule.action === "dec") {
+          setVolume01(audio.volume - delta01);
+          logLine(`🔊 音量减少：-${val}% → ${Math.round(audio.volume * 100)}%`);
+          return;
+        }
+      }
+
+      // ===== 播放列表（多文件选择 + 文件名排序）=====
+      let playlist = [];
+      let currentIndex = 0;
+
+      function rebuildPlaylistView() {
+        if (!playlistEl || !nowSongEl) return;
+        if (!playlist.length) {
+          playlistEl.textContent = "(还没选择文件)";
+          nowSongEl.textContent = "--";
+          return;
+        }
+        const lines = playlist.map((x, i) => {
+          const mark = (i === currentIndex) ? "👉 " : "   ";
+          const idx = String(i + 1).padStart(2, "0");
+          return `${mark}${idx}. ${x.name}`;
+        });
+        playlistEl.textContent = lines.join("\n");
+        nowSongEl.textContent = `${currentIndex + 1}/${playlist.length} - ${playlist[currentIndex].name}`;
+      }
+
+      function setIndex(i) {
+        if (!playlist.length) return;
+        currentIndex = (i + playlist.length) % playlist.length;
+        rebuildPlaylistView();
+      }
+
+      async function playCurrent(startSec = 0) {
+        if (!playlist.length) {
+          logLine("❌ 没有播放列表：请先选择多首音频文件");
+          return;
+        }
+        await playFromUrl(playlist[currentIndex].url, startSec);
+      }
+
+      async function nextTrack() {
+        if (!playlist.length) {
+          logLine("❌ 没有播放列表：请先选择多首音频文件");
+          return;
+        }
+        setIndex(currentIndex + 1);
+        logLine(`⏭ 下一首：${playlist[currentIndex].name}`);
+        await playCurrent(0);
+      }
+
+      async function prevTrack() {
+        if (!playlist.length) {
+          logLine("❌ 没有播放列表：请先选择多首音频文件");
+          return;
+        }
+        setIndex(currentIndex - 1);
+        logLine(`⏮ 上一首：${playlist[currentIndex].name}`);
+        await playCurrent(0);
+      }
+
+      function parsePlayN(text, prefix) {
+        if (!prefix) return null;
+        const idx = text.indexOf(prefix);
+        if (idx === -1) return null;
+        const rest = text.slice(idx + prefix.length);
+
+        const m = rest.match(/^\s*([0-9]+)\s*首/);
+        if (m) return Number(m[1]);
+
+        const m2 = rest.match(/^\s*([一二三四五六七八九十]{1,3})\s*首/);
+        if (!m2) return null;
+
+        const cn = m2[1];
+        const map = {一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9};
+        if (cn === "十") return 10;
+        if (cn.length === 1) return map[cn] || null;
+        if (cn.length === 2) {
+          if (cn[0] === "十") return 10 + (map[cn[1]] || 0);
+          if (cn[1] === "十") return (map[cn[0]] || 0) * 10;
+        }
+        if (cn.length === 3 && cn[1] === "十") {
+          return (map[cn[0]] || 0) * 10 + (map[cn[2]] || 0);
+        }
+        return null;
+      }
+
+      // ✅ 读取多文件并排序
+      if (filesInput) {
+        filesInput.addEventListener('change', () => {
+          try {
+            for (const item of playlist) {
+              try { URL.revokeObjectURL(item.url); } catch {}
+            }
+            playlist = [];
+            currentIndex = 0;
+
+            const files = Array.from(filesInput.files || []);
+            // 只保留音频
+            const audioFiles = files.filter(f => (f.type || "").startsWith("audio/") || /\.(mp3|m4a|aac|wav|ogg|flac)$/i.test(f.name));
+
+            // 按文件名排序（支持数字排序）
+            audioFiles.sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN", { numeric: true, sensitivity: "base" }));
+
+            playlist = audioFiles.map(f => ({ name: f.name, file: f, url: URL.createObjectURL(f) }));
+            logLine(`🎵 已加载音频：${playlist.length} 首（按文件名排序）`);
+            rebuildPlaylistView();
+          } catch (e) {
+            logLine(`❌ 读取文件失败：${e?.message || e}`);
+          }
+        });
+      }
+
+      playCurrentBtn && (playCurrentBtn.onclick = () => playCurrent(0));
+      nextBtn && (nextBtn.onclick = () => nextTrack());
+      prevBtn && (prevBtn.onclick = () => prevTrack());
+
+      // ===== Web Speech API（安卓 Chrome 可用）=====
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        setStatus("no-asr");
+        logLine("❌ 当前浏览器不支持 Web Speech API。请用安卓 Chrome。");
+        return;
+      }
+
+      const rec = new SpeechRecognition();
+      rec.lang = "zh-CN";
+      rec.continuous = true;
+      rec.interimResults = false;
+
+      let lastTriggerAt = 0;
+
+      rec.onstart = () => {
+        setStatus("listening");
+        logLine("=== 开始识别 ===");
+        rebuildPlaylistView();
+      };
+
+      rec.onerror = (e) => {
+        setStatus("error");
+        logLine(`❌ 识别错误：${e?.error || e?.message || e}`);
+      };
+
+      rec.onend = () => {
+        setStatus("stopped");
+        logLine("=== 已停止识别 ===");
+      };
+
+      rec.onresult = async (e) => {
+        const text = e.results[e.results.length - 1][0].transcript.trim();
+        logLine(`识别：${text}`);
+
+        const now = Date.now();
+        if (now - lastTriggerAt < cooldownMs()) return;
+
+        const { next, prev, playNPrefix } = getSwitchKeywords();
+
+        if (next && text.includes(next)) { lastTriggerAt = now; await nextTrack(); return; }
+        if (prev && text.includes(prev)) { lastTriggerAt = now; await prevTrack(); return; }
+
+        const n = parsePlayN(text, playNPrefix);
+        if (n != null) {
+          lastTriggerAt = now;
+          if (!playlist.length) return logLine("❌ 还没选择音频文件，无法跳到第N首");
+          const idx = n - 1;
+          if (idx < 0 || idx >= playlist.length) return logLine(`❌ 第${n}首不存在（共 ${playlist.length} 首）`);
+          setIndex(idx);
+          logLine(`🎯 跳到第${n}首：${playlist[currentIndex].name}`);
+          await playCurrent(0);
+          return;
+        }
+
+        for (const vr of getVolumeRules()) {
+          if (vr.keyword && text.includes(vr.keyword)) { lastTriggerAt = now; applyVolumeRule(vr); return; }
+        }
+
+        for (const pr of getPlayRules()) {
+          if (pr.keyword && text.includes(pr.keyword)) { lastTriggerAt = now; await playFromUrl(pr.url, pr.start); return; }
+        }
+      };
+
+      if (audio) setVolume01(audio.volume || 1);
+
+      startBtn && (startBtn.onclick = async () => {
+        setStatus("starting");
+        logLine("🟢 点击：开始识别");
+        try { await audio?.play(); audio?.pause(); } catch {}
+        try { rec.start(); logLine("✅ 已调用 rec.start()"); }
+        catch (e) { setStatus("start-failed"); logLine(`❌ rec.start() 失败：${e?.name || ""} ${e?.message || e}`); }
+      });
+
+      stopBtn && (stopBtn.onclick = () => { logLine("🟥 点击：停止识别"); try { rec.stop(); } catch {} });
+      clearBtn && (clearBtn.onclick = () => { if (logEl) logEl.textContent = "（已清空）"; });
+      testBtn && (testBtn.onclick = async () => {
+        logLine("🧪 测试播放：使用口令1规则");
+        const pr = getPlayRules()[0];
+        if (!pr) return logLine("❌ 口令1 未配置或音频为空");
+        await playFromUrl(pr.url, pr.start);
+      });
+
+      audio?.addEventListener("volumechange", () => { if (volEl) volEl.textContent = Math.round(audio.volume * 100) + "%"; });
+
+      setStatus("ready");
+      logLine("✅ 页面脚本加载完成（多文件版）。先选多首音频文件，再喊“下一首/上一首”。");
+    })();
+  </script>
 </body>
 </html>
