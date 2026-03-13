@@ -394,4 +394,145 @@
               try { URL.revokeObjectURL(item.url); } catch {}
             }
             playlist = [];
-            currentIndex = 0
+            currentIndex = 0;
+            rebuildPlaylistView();
+            logLine("🗑️ 已清空歌单");
+          } catch (e) {
+            logLine(`❌ 清空失败：${e?.message || e}`);
+          }
+        };
+      }
+
+      playCurrentBtn && (playCurrentBtn.onclick = () => playCurrent(0));
+      nextBtn && (nextBtn.onclick = () => nextTrack());
+      prevBtn && (prevBtn.onclick = () => prevTrack());
+
+      // ===== Web Speech API（安卓 Chrome 可用）=====
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        setStatus("no-asr");
+        logLine("❌ 当前浏览器不支持 Web Speech API。请用安卓 Chrome。");
+        return;
+      }
+
+      const rec = new SpeechRecognition();
+      rec.lang = "zh-CN";
+      rec.continuous = true;
+      rec.interimResults = false;
+
+      let lastTriggerAt = 0;
+      let startTimer = null;
+
+      rec.onstart = () => {
+        if (startTimer) clearTimeout(startTimer);
+        setStatus("listening");
+        logLine("=== 开始识别 ===");
+        rebuildPlaylistView();
+      };
+
+      rec.onerror = (e) => {
+        if (startTimer) clearTimeout(startTimer);
+        setStatus("error");
+        logLine(`❌ 识别错误：${e?.error || e?.message || e}`);
+        if ((e?.error || "").toLowerCase() === "network") {
+          logLine("提示：network 常见于网络/浏览器限制。建议换网络/热点，或用系统 Chrome 而非内置浏览器。");
+        }
+      };
+
+      rec.onend = () => {
+        if (startTimer) clearTimeout(startTimer);
+        setStatus("stopped");
+        logLine("=== 已停止识别 ===");
+      };
+
+      rec.onresult = async (e) => {
+        const text = e.results[e.results.length - 1][0].transcript.trim();
+        logLine(`识别：${text}`);
+
+        const now = Date.now();
+        if (now - lastTriggerAt < cooldownMs()) return;
+
+        const { next, prev, playNPrefix } = getSwitchKeywords();
+
+        if (next && text.includes(next)) { lastTriggerAt = now; await nextTrack(); return; }
+        if (prev && text.includes(prev)) { lastTriggerAt = now; await prevTrack(); return; }
+
+        const n = parsePlayN(text, playNPrefix);
+        if (n != null) {
+          lastTriggerAt = now;
+          if (!playlist.length) return logLine("❌ 还没添加歌曲，无法跳到第N首");
+          const idx = n - 1;
+          if (idx < 0 || idx >= playlist.length) return logLine(`❌ 第${n}首不存在（共 ${playlist.length} 首）`);
+          setIndex(idx);
+          logLine(`🎯 跳到第${n}首：${playlist[currentIndex].name}`);
+          await playCurrent(0);
+          return;
+        }
+
+        for (const vr of getVolumeRules()) {
+          if (vr.keyword && text.includes(vr.keyword)) { lastTriggerAt = now; applyVolumeRule(vr); return; }
+        }
+
+        for (const pr of getPlayRules()) {
+          if (pr.keyword && text.includes(pr.keyword)) { lastTriggerAt = now; await playFromUrl(pr.url, pr.start); return; }
+        }
+      };
+
+      if (audio) setVolume01(audio.volume || 1);
+
+      startBtn && (startBtn.onclick = async () => {
+        setStatus("starting");
+        logLine("🟢 点击：开始识别");
+
+        // 暖机（失败也不影响识别）
+        try { await audio?.play(); audio?.pause(); } catch {}
+
+        // 超时兜底：1.5 秒没 onstart 就提示
+        if (startTimer) clearTimeout(startTimer);
+        startTimer = setTimeout(() => {
+          if (statusEl && statusEl.textContent === "starting") {
+            setStatus("start-timeout");
+            logLine("❌ 启动识别超时：没有收到 onstart。");
+            logLine("建议：1) 用安卓 Chrome 打开 2) 确认麦克风权限允许 3) 不要用微信内置浏览器 4) 换网络/热点");
+          }
+        }, 1500);
+
+        try {
+          rec.start();
+          logLine("✅ 已调用 rec.start()");
+        } catch (e) {
+          if (startTimer) clearTimeout(startTimer);
+          setStatus("start-failed");
+          logLine(`❌ rec.start() 失败：${e?.name || ""} ${e?.message || e}`);
+          if ((e?.name || "").includes("InvalidStateError")) {
+            logLine("提示：识别可能已在运行，先点“停止识别”再开始。");
+          }
+        }
+      });
+
+      stopBtn && (stopBtn.onclick = () => {
+        logLine("🟥 点击：停止识别");
+        try { rec.stop(); } catch {}
+      });
+
+      clearBtn && (clearBtn.onclick = () => {
+        if (logEl) logEl.textContent = "（已清空）";
+      });
+
+      testBtn && (testBtn.onclick = async () => {
+        logLine("🧪 测试播放：使用口令1规则");
+        const pr = getPlayRules()[0];
+        if (!pr) return logLine("❌ 口令1 未配置或音频为空");
+        await playFromUrl(pr.url, pr.start);
+      });
+
+      audio?.addEventListener("volumechange", () => {
+        if (volEl) volEl.textContent = Math.round(audio.volume * 100) + "%";
+      });
+
+      setStatus("ready");
+      logLine("✅ 页面脚本加载完成。先一首一首添加歌曲，再喊“下一首/上一首/播放第三首/调大音量”。");
+    })();
+  </script>
+</body>
+</html>
