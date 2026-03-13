@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>iPhone 录音 → Whisper 转写</title>
+  <style>
+    body { font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; padding: 16px; }
+    button { padding: 12px 14px; margin-right: 8px; margin-top: 8px; }
+    #log { white-space: pre-wrap; background:#111; color:#eee; padding:12px; border-radius:10px; min-height:160px; }
+  </style>
+</head>
+<body>
+  <h3>iPhone 网页：按住说话 → Whisper 转写</h3>
+  <button id="rec">按住说话</button>
+  <button id="stop">停止</button>
+  <div style="margin-top:12px;"><b>识别文本：</b> <span id="text">--</span></div>
+  <div id="log">准备就绪（必须 HTTPS）。</div>
+
+<script>
+  const logEl = document.getElementById('log');
+  const textEl = document.getElementById('text');
+  const recBtn = document.getElementById('rec');
+  const stopBtn = document.getElementById('stop');
+
+  function log(line) {
+    const ts = new Date().toLocaleTimeString();
+    logEl.textContent += `\n[${ts}] ${line}`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  let mediaRecorder = null;
+  let chunks = [];
+  let stream = null;
+
+  async function startRecording() {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    const mimeTypes = ['audio/mp4','audio/webm;codecs=opus','audio/webm'];
+    const mimeType = mimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || '';
+
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    chunks = [];
+
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+
+    mediaRecorder.onstop = async () => {
+      try {
+        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/mp4' });
+        log(`录音结束：${Math.round(blob.size/1024)}KB，上传识别…`);
+        await sendToASR(blob);
+      } finally {
+        stream?.getTracks()?.forEach(t => t.stop());
+        stream = null;
+      }
+    };
+
+    mediaRecorder.start();
+    log("🎙️ 开始录音…");
+  }
+
+  function stopRecording() {
+    if (mediaRecorder?.state === "recording") mediaRecorder.stop();
+  }
+
+  async function sendToASR(blob) {
+    const fd = new FormData();
+    fd.append("file", blob, "speech.mp4");
+
+    const res = await fetch("/api/asr", { method: "POST", body: fd });
+    if (!res.ok) {
+      const t = await res.text().catch(()=> "");
+      log(`❌ 识别失败：HTTP ${res.status} ${t}`);
+      return;
+    }
+    const data = await res.json();
+    const text = (data.text || "").trim();
+    textEl.textContent = text || "(空)";
+    log("✅ 识别结果：" + text);
+  }
+
+  recBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); }, { passive:false });
+  recBtn.addEventListener('touchend',   (e) => { e.preventDefault(); stopRecording();  }, { passive:false });
+  recBtn.addEventListener('mousedown', startRecording);
+  recBtn.addEventListener('mouseup', stopRecording);
+  stopBtn.onclick = stopRecording;
+</script>
+</body>
+</html>
