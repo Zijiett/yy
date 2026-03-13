@@ -1,0 +1,8 @@
+{
+  "name": "voice-web-asr",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "multer": "^1.4.5-lts.1"
+  }
+}
