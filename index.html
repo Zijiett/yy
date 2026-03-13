@@ -68,7 +68,6 @@
     <div class="ruleline">
       <b>歌单（单首添加）：</b>
 
-      <!-- ✅ iOS 更友好的 accept（扩展名 + mime）+ multiple -->
       <input
         id="files"
         type="file"
@@ -76,7 +75,6 @@
         accept=".mp3,.m4a,.aac,.wav,.ogg,.flac,audio/mpeg,audio/mp3,audio/*"
       />
 
-      <!-- ✅ iPhone 兜底：允许任意文件 -->
       <label class="hint" style="user-select:none;">
         <input id="iosLoose" type="checkbox" />
         iPhone兼容模式（允许任意文件）
@@ -204,7 +202,7 @@
       let playlist = [];
       let currentIndex = 0;
 
-      // SpeechRecognition state
+      // SpeechRecognition state（iOS Safari 通常不支持）
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recognition = null;
       let recognizing = false;
@@ -216,6 +214,11 @@
 
       // cooldown
       const lastHitAt = new Map();
+
+      // ===== iOS 兼容音量：WebAudio GainNode（比 audio.volume 稳）=====
+      let audioCtx = null;
+      let gainNode = null;
+      let mediaSource = null;
 
       // ----------------------------
       // ui/log
@@ -232,7 +235,7 @@
         logEl.scrollTop = logEl.scrollHeight;
       }
 
-      // ===== 全局错误捕获：任何脚本报错都写进日志（否则你看不到原因）=====
+      // ===== 全局错误捕获：任何脚本报错都写进日志 =====
       window.addEventListener("error", (e) => {
         try {
           const msg = `💥 JS错误：${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`;
@@ -310,12 +313,67 @@
       }
 
       // ----------------------------
+      // WebAudio graph (iOS volume/mute)
+      // ----------------------------
+      function ensureAudioGraph() {
+        if (!audio) return false;
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return false;
+
+        if (!audioCtx) {
+          audioCtx = new AudioContextClass();
+          gainNode = audioCtx.createGain();
+          gainNode.gain.value = 1; // 100%
+          gainNode.connect(audioCtx.destination);
+        }
+
+        // MediaElementSource 只能创建一次；重复创建会抛异常
+        if (!mediaSource) {
+          try {
+            mediaSource = audioCtx.createMediaElementSource(audio);
+            mediaSource.connect(gainNode);
+          } catch (e) {
+            // 有些情况下已经存在连接/重复创建会报错，忽略
+          }
+        }
+        return true;
+      }
+
+      async function resumeAudioContextIfNeeded(tag = "") {
+        if (!ensureAudioGraph() || !audioCtx) return;
+        if (audioCtx.state === "suspended") {
+          try {
+            await audioCtx.resume();
+            logLine(`🎚️ WebAudio已激活${tag ? "：" + tag : ""}`);
+          } catch (e) {
+            logLine(`⚠️ WebAudio激活失败：${e?.message || e}`);
+          }
+        }
+      }
+
+      // ----------------------------
       // audio helpers
       // ----------------------------
       function setVolume01(v01) {
+        const v = clamp(v01, 0, 1);
+
+        // 优先用 WebAudio（iOS 更稳）
+        if (ensureAudioGraph() && gainNode) {
+          gainNode.gain.value = v;
+          if (volEl) volEl.textContent = Math.round(v * 100) + "%";
+          return;
+        }
+
+        // fallback：部分 iOS 可能无效，但安卓/桌面可用
         if (!audio) return;
-        audio.volume = clamp(v01, 0, 1);
+        audio.volume = v;
         if (volEl) volEl.textContent = Math.round(audio.volume * 100) + "%";
+      }
+
+      function getCurrentVolume01() {
+        if (ensureAudioGraph() && gainNode) return clamp(gainNode.gain.value, 0, 1);
+        if (!audio) return 1;
+        return clamp(audio.volume ?? 1, 0, 1);
       }
 
       async function playFromUrl(url, second) {
@@ -324,6 +382,13 @@
           if (!url) {
             logLine("❌ 播放失败：URL 为空");
             return;
+          }
+
+          // WebAudio：尽量保持激活（iOS 要求用户手势触发过一次）
+          // 这里不强求一定成功；真正激活在按钮点击里做
+          if (ensureAudioGraph() && audioCtx && audioCtx.state === "suspended") {
+            // 若之前用户有手势激活过，这里可能也能 resume；失败也没关系
+            try { await audioCtx.resume(); } catch (_) {}
           }
 
           if (audio.getAttribute('src') !== url) {
@@ -337,6 +402,7 @@
           const trySeek = () => { try { audio.currentTime = target; } catch (_) {} };
 
           await audio.play();
+
           if (Number.isFinite(target) && target > 0) {
             if (audio.readyState >= 1) {
               trySeek();
@@ -352,7 +418,7 @@
           logLine(`▶ 播放：${(url || "").slice(0, 80)}${url.length > 80 ? "…" : ""} | 从 ${target}s`);
         } catch (e) {
           logLine(`❌ 播放失败：${e?.name || ""} ${e?.message || e}`);
-          logLine(`提示：请先手动点一次“播放当前/测试播放”授权媒体播放；并尽量用 HTTPS。`);
+          logLine(`提示：iPhone需要先点一次“播放当前/测试播放”完成媒体授权；尽量用 HTTPS。`);
         }
       }
 
@@ -428,7 +494,7 @@
         }
       }
 
-      // ✅ iPhone 兜底：切换 accept，减少“灰色不可选”
+      // iPhone 兜底：切换 accept，减少“灰色不可选”
       const DEFAULT_ACCEPT = ".mp3,.m4a,.aac,.wav,.ogg,.flac,audio/mpeg,audio/mp3,audio/*";
       function applyAcceptMode() {
         if (!filesInput) return;
@@ -444,10 +510,8 @@
 
       // 单首添加（也兼容一次选多个）
       if (filesInput) {
-        // 初始化 accept（确保运行时一致）
         filesInput.setAttribute("accept", DEFAULT_ACCEPT);
 
-        // iOS：点开选择前给提示
         filesInput.addEventListener("click", () => {
           const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
           if (isIOS) {
@@ -468,7 +532,6 @@
 
             let added = 0;
             for (const f of pickedFiles) {
-              // ✅ 更宽松的判断：iOS 有时 f.type 为空
               const nameOk = /\.(mp3|m4a|aac|wav|ogg|flac)$/i.test(f.name);
               const typeOk = (f.type || "").startsWith("audio/");
               const isAudio = typeOk || nameOk;
@@ -528,7 +591,7 @@
       }
 
       // ----------------------------
-      // Speech recognition
+      // Speech recognition (hard diagnostics)
       // ----------------------------
       async function startRecognitionWithHardDiagnostics() {
         setStatus("checking");
@@ -603,7 +666,12 @@
         recognition.onstart = () => { recognizing = true; setStatus("listening"); logLine("🎙️ onstart：识别已真正开始"); };
         recognition.onaudiostart = () => logLine("🔊 onaudiostart：检测到音频输入");
         recognition.onspeechstart = () => logLine("🗣️ onspeechstart：检测到说话");
-        recognition.onerror = (e) => { setStatus("error"); logLine(`❌ onerror：${e.error || "unknown"}`); };
+
+        recognition.onerror = (e) => {
+          setStatus("error");
+          logLine(`❌ onerror：${e.error || "unknown"}`);
+        };
+
         recognition.onend = () => {
           recognizing = false;
           setStatus("stopped");
@@ -725,6 +793,10 @@
           if (!r.kw) continue;
           if (text.includes(r.kw)) {
             if (!canHit(r.key, cooldown)) return;
+
+            // iOS：语音触发播放可能会因“无用户手势”失败，这里尽量尝试 resume（不保证）
+            await resumeAudioContextIfNeeded("语音触发");
+
             const sel = safeEl(r.selectId);
             const url = sel?.value || "";
             if (!url) {
@@ -746,25 +818,31 @@
           if (!vr.kw) continue;
           if (text.includes(vr.kw)) {
             if (!canHit(vr.key, cooldown)) return;
-            if (!audio) return;
 
+            // iOS 音量必须 WebAudio 生效：尽量 resume（不保证语音触发能成功）
+            await resumeAudioContextIfNeeded("语音调音量");
+
+            const cur = getCurrentVolume01();
             const delta = clamp(vr.val, 0, 100) / 100;
-            if (vr.action === "inc") setVolume01(audio.volume + delta);
-            else if (vr.action === "dec") setVolume01(audio.volume - delta);
+
+            if (vr.action === "inc") setVolume01(cur + delta);
+            else if (vr.action === "dec") setVolume01(cur - delta);
             else setVolume01(delta);
 
-            logLine(`🔈 音量调整：${vr.kw} → ${Math.round((audio.volume || 0) * 100)}%`);
+            logLine(`🔈 音量调整：${vr.kw} → ${Math.round(getCurrentVolume01() * 100)}%`);
             return;
           }
         }
       }
 
       // ----------------------------
-      // Buttons
+      // Buttons (user gesture: activate WebAudio)
       // ----------------------------
       if (startBtn) {
         startBtn.addEventListener("click", async () => {
           logLine("🟢 点击：开始识别（进入强制自检）");
+          // 语音识别按钮也算用户手势：顺便激活 WebAudio，便于后续音量生效
+          await resumeAudioContextIfNeeded("开始识别按钮");
           await startRecognitionWithHardDiagnostics();
         });
       }
@@ -775,11 +853,23 @@
         logLine("🧹 已清空日志");
       });
 
-      if (playCurrentBtn) playCurrentBtn.addEventListener("click", () => playCurrent(0));
-      if (nextBtn) nextBtn.addEventListener("click", () => nextTrack());
-      if (prevBtn) prevBtn.addEventListener("click", () => prevTrack());
+      if (playCurrentBtn) playCurrentBtn.addEventListener("click", async () => {
+        await resumeAudioContextIfNeeded("播放当前按钮");
+        await playCurrent(0);
+      });
+
+      if (nextBtn) nextBtn.addEventListener("click", async () => {
+        await resumeAudioContextIfNeeded("下一首按钮");
+        await nextTrack();
+      });
+
+      if (prevBtn) prevBtn.addEventListener("click", async () => {
+        await resumeAudioContextIfNeeded("上一首按钮");
+        await prevTrack();
+      });
 
       if (testBtn) testBtn.addEventListener("click", async () => {
+        await resumeAudioContextIfNeeded("测试播放按钮");
         const sel = safeEl("u1");
         const url = sel?.value || "";
         const sec = Number(safeEl("t1")?.value || 0);
@@ -791,17 +881,11 @@
       });
 
       if (audio) {
-        audio.addEventListener("volumechange", () => {
-          if (volEl) volEl.textContent = Math.round((audio.volume || 0) * 100) + "%";
-        });
-        audio.addEventListener("ended", () => {
-          logLine("⏹️ 当前歌曲播放结束");
-        });
+        audio.addEventListener("ended", () => logLine("⏹️ 当前歌曲播放结束"));
       }
 
-      try {
-        if (audio && volEl) volEl.textContent = Math.round((audio.volume ?? 1) * 100) + "%";
-      } catch (_) {}
+      // 初始音量显示（用当前 gain / volume）
+      if (volEl) volEl.textContent = Math.round(getCurrentVolume01() * 100) + "%";
 
       // 初始化下拉提示
       fillSelectOptions();
@@ -811,14 +895,16 @@
       const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
       if (isIOS) {
         logLine("🍎 iPhone提示：文件旁的云朵=未下载到本机，会在网页选择器里灰掉。先在“文件App”点一下下载完成再选。");
+        logLine("🍎 iPhone提示：网页无法修改系统音量；本页面用 WebAudio 实现“应用内音量/静音”，需先点一次播放按钮完成授权。");
       }
 
-      // 默认应用一次 accept 模式（避免用户刷新后状态不一致）
+      // 默认应用一次 accept 模式
       applyAcceptMode();
 
       window.addEventListener("beforeunload", () => {
         try { revokeAllObjectUrls(); } catch (_) {}
         try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+        try { if (audioCtx) audioCtx.close(); } catch (_) {}
       });
     })();
   </script>
